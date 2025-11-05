@@ -14,7 +14,7 @@ public protocol AudioQueueCaptureSessionDelegate: AnyObject {
 }
 
 @available(macOS, unavailable)
-public class AudioQueueCaptureSession {
+public class AudioQueueCaptureSession: @unchecked Sendable {
     
     public enum Error: Swift.Error {
         case noInputAvailable
@@ -40,12 +40,15 @@ public class AudioQueueCaptureSession {
         }
         
         private struct Key {
-            static var tracker = ""
+            private nonisolated(unsafe) static var trackerKey = ""
+            static var tracker: UnsafeRawPointer {
+                return withUnsafePointer(to: &trackerKey) { UnsafeRawPointer($0) }
+            }
         }
         
         static func attach(to: AnyObject, callback: @escaping () -> Void) {
             let tracker = LifetimeTracker(callback: callback)
-            objc_setAssociatedObject(to, &Key.tracker, tracker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            objc_setAssociatedObject(to, Key.tracker, tracker, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         }
     }
     
@@ -124,7 +127,7 @@ public class AudioQueueCaptureSession {
         }
     }
     
-    public func beginAudioRecordingAsynchronously(completion: @escaping (Swift.Error?) -> Void) {
+    public func beginAudioRecordingAsynchronously(completion: @escaping @Sendable (Swift.Error?) -> Void) {
         self.queue.async {
             do {
                 self._stopAudioRecording()
@@ -164,7 +167,13 @@ public class AudioQueueCaptureSession {
             self.clientInfo = ClientInfo(session: self, timebaseInfo: timebaseInfo)
             
             var audioQueue: AudioQueueRef!
-            let status = AudioQueueNewInput(&recordFormat, { (info, inAudioQueue, bufferRef, startTime, inNumPackets, inPacketDesc) in
+            // Use withUnsafeMutablePointer to explicitly handle the unsafe pointer conversion
+            // Note: ClientInfo contains a weak object reference, but this is safe because:
+            // 1. The struct is stored in self.clientInfo, keeping it alive for the AudioQueue lifetime
+            // 2. The weak reference prevents retain cycles
+            // 3. The pointer is only used within the callback execution context
+            let status = withUnsafeMutablePointer(to: &self.clientInfo!) { clientInfoPtr in
+                AudioQueueNewInput(&recordFormat, { (info, inAudioQueue, bufferRef, startTime, inNumPackets, inPacketDesc) in
                 guard let clientInfo = info?.bindMemory(to: ClientInfo.self, capacity: 1).pointee else { return }
                 guard let session = clientInfo.session else { return }
                 if inNumPackets > 0 {
@@ -192,9 +201,14 @@ public class AudioQueueCaptureSession {
                                     strongSelf.inflightBufferCount -= 1
                                 }
                                 
-                                session.delegateQueue.async {
-                                    session.delegate?.audioQueueCaptureSession(session, didOutputSampleBuffer: sampleBuffer)
-                                }
+                                                        // CMSampleBuffer is thread-safe for read operations and only used within the callback
+                        // Note: sampleBuffer capture warning is expected - CMSampleBuffer is not Sendable but is thread-safe for reads
+                        // swiftlint:disable sendable_capture
+                        nonisolated(unsafe) let sampleBufferForCallback = sampleBuffer
+                        session.delegateQueue.async { @Sendable [weak session] in
+                            guard let session = session else { return }
+                            session.delegate?.audioQueueCaptureSession(session, didOutputSampleBuffer: sampleBufferForCallback)
+                        }
                             } else {
                                 session.inflightBufferCountLock.unlock()
                                 print("\(session): Buffer dropped due to too many inflight buffer.")
@@ -203,11 +217,13 @@ public class AudioQueueCaptureSession {
                     }
                 }
                 AudioQueueEnqueueBuffer(inAudioQueue, bufferRef, 0, nil)
-            }, &self.clientInfo, nil, nil, 0, &audioQueue)
+                }, UnsafeMutableRawPointer(clientInfoPtr), nil, nil, 0, &audioQueue)
+            }
             
             if status != 0 {
                 throw Error.cannotCreateAudioQueue
             }
+            // Note: self.clientInfo is kept alive by being stored in self, ensuring the AudioQueue callback has valid access
             
             let bufferByteSize = try AudioQueueCaptureSession.bufferSize(format: recordFormat, audioQueue: audioQueue, duration: 0.1)
             

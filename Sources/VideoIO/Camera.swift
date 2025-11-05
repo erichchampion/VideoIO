@@ -8,7 +8,7 @@
 import Foundation
 import AVFoundation
 
-@available(iOS 10.0, macOS 10.15, *)
+@available(iOS 18.0, macOS 10.15, *)
 @available(tvOS, unavailable)
 @available(macCatalyst 14.0, *)
 public class Camera {
@@ -20,7 +20,7 @@ public class Camera {
         case noRequiredMediaTypeFoundOnDevice
     }
     
-    public struct Configurator {
+    public struct Configurator: @unchecked Sendable {
         /// Called when video connection estiblished or video device changed. Called before `captureSession.commitConfiguration`.
         public var videoConnectionConfigurator: (Camera, AVCaptureConnection) -> Void
         
@@ -30,7 +30,13 @@ public class Camera {
         public static let portraitFrontMirroredVideoOutput: Configurator = {
             var configurator = Configurator()
             configurator.videoConnectionConfigurator = { camera, connection in
-                connection.videoOrientation = .portrait
+                // Set rotation angle to 0 for portrait orientation (iOS 17.0+ / macOS 14.0+)
+                if #available(iOS 17.0, macOS 14.0, *) {
+                    connection.videoRotationAngle = 0.0
+                } else {
+                    // Fallback for older macOS versions (deprecated API)
+                    connection.videoOrientation = .portrait
+                }
                 if camera.videoDevice?.position == .front {
                     connection.isVideoMirrored = true
                 }
@@ -110,13 +116,7 @@ public class Camera {
                 #elseif os(tvOS)
                 deviceTypes = []
                 #else
-                if #available(iOS 11.1, *) {
-                    deviceTypes = [.builtInDualCamera, .builtInTrueDepthCamera, .builtInWideAngleCamera]
-                } else if #available(iOS 10.2, *) {
-                    deviceTypes = [.builtInDualCamera, .builtInWideAngleCamera]
-                } else {
-                    deviceTypes = [.builtInWideAngleCamera]
-                }
+                deviceTypes = [.builtInDualCamera, .builtInTrueDepthCamera, .builtInWideAngleCamera]
                 #endif
             } else {
                 deviceTypes = defaultCameraDeviceTypes
@@ -295,15 +295,10 @@ public class Camera {
     }
     
     public var isDepthDataOutputSupported: Bool {
-        if #available(iOS 11.0, *) {
-            return self.photoOutput?.isDepthDataDeliverySupported ?? false
-        } else {
-            return false
-        }
+        return self.photoOutput?.isDepthDataDeliverySupported ?? false
     }
     
     private var _outputSynchronizer: Any?
-    @available(iOS 11.0, *)
     @available(macCatalyst 14.0, *)
     private var outputSynchronizer: AVCaptureDataOutputSynchronizer? {
         get {
@@ -314,14 +309,12 @@ public class Camera {
         }
     }
     
-    @available(iOS 11.0, *)
     @available(macCatalyst 14.0, *)
     public var depthCaptureConnection: AVCaptureConnection? {
         return self.depthDataOutput?.connection(with: .depthData)
     }
     
     private var _depthDataOutput: Any?
-    @available(iOS 11.0, *)
     @available(macCatalyst 14.0, *)
     public private(set) var depthDataOutput: AVCaptureDepthDataOutput? {
         get {
@@ -332,7 +325,6 @@ public class Camera {
         }
     }
     
-    @available(iOS 11.0, *)
     @available(macCatalyst 14.0, *)
     public func enableSynchronizedVideoAndDepthDataOutput(on queue: DispatchQueue, delegate: AVCaptureDataOutputSynchronizerDelegate) throws {
         assert(self.videoDataOutput == nil)
@@ -374,7 +366,6 @@ public class Camera {
         }
     }
     
-    @available(iOS 11.0, *)
     @available(macCatalyst 14.0, *)
     public func disableSynchronizedVideoAndDepthDataOutput() {
         self.captureSession.beginConfiguration()
@@ -400,7 +391,8 @@ public class Camera {
     
     internal var photoCaptureDelegateHandlers: [AnyObject] = []
     
-    @available(macOS, unavailable)
+    #if !os(macOS)
     internal var audioQueueCaptureSession: AudioQueueCaptureSession?
+    #endif
 }
 

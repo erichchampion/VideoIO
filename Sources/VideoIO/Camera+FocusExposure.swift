@@ -8,7 +8,7 @@
 import Foundation
 import AVFoundation
 
-@available(iOS 10.0, macOS 10.15, *)
+@available(iOS 18.0, macOS 10.15, *)
 @available(tvOS, unavailable)
 @available(macCatalyst 14.0, *)
 extension Camera {
@@ -47,7 +47,7 @@ extension Camera {
     }
     
     @available(macOS, unavailable)
-    public func setExposureTargetBias(_ bias: Float, completion: ((CMTime) -> Void)? = nil) throws {
+    public func setExposureTargetBias(_ bias: Float, completion: (@Sendable (CMTime) -> Void)? = nil) throws {
         guard let device = self.videoDevice else {
             return
         }
@@ -75,30 +75,60 @@ extension Camera {
         var yInView: CGFloat
         var viewHeight: CGFloat
         var viewWidth: CGFloat
-        switch connection.videoOrientation {
-        case .portrait:
+        
+        // Use videoRotationAngle instead of deprecated videoOrientation (macOS 14.0+)
+        let rotationAngle: CGFloat
+        if #available(macOS 14.0, *) {
+            rotationAngle = connection.videoRotationAngle
+        } else {
+            // Fallback: convert deprecated videoOrientation to angle
+            let orientation = connection.videoOrientation
+            switch orientation {
+            case .portrait:
+                rotationAngle = 0.0
+            case .portraitUpsideDown:
+                rotationAngle = 180.0
+            case .landscapeRight:
+                rotationAngle = 90.0
+            case .landscapeLeft:
+                rotationAngle = 270.0
+            @unknown default:
+                rotationAngle = 0.0
+            }
+        }
+        // Convert rotation angle (in degrees) to determine orientation equivalent
+        // 0 = portrait, 90 = landscapeRight, 180 = portraitUpsideDown, 270 = landscapeLeft
+        switch Int(rotationAngle) {
+        case 0:
+            // Portrait
             viewHeight = size.width
             viewWidth = size.height
             xInView = point.y
             yInView = viewHeight - point.x
-        case .landscapeRight:
+        case 90:
+            // LandscapeRight
             viewHeight = size.height
             viewWidth = size.width
             xInView = point.x
             yInView = point.y
-        case .landscapeLeft:
-            viewHeight = size.height
-            viewWidth = size.width
-            xInView = viewWidth - point.x
-            yInView = viewHeight - point.y
-        case .portraitUpsideDown:
+        case 180:
+            // PortraitUpsideDown
             viewHeight = size.width
             viewWidth = size.height
             xInView = point.y
             yInView = point.x
-        @unknown default:
-            assertionFailure()
-            return CGPoint(x: 0.5, y: 0.5)
+        case 270:
+            // LandscapeLeft
+            viewHeight = size.height
+            viewWidth = size.width
+            xInView = viewWidth - point.x
+            yInView = viewHeight - point.y
+        default:
+            // Default to portrait for unrecognized angles
+            viewHeight = size.width
+            viewWidth = size.height
+            xInView = point.y
+            yInView = viewHeight - point.x
         }
         
         let videoRatio = CGFloat(videoDimensions.width) / CGFloat(videoDimensions.height)

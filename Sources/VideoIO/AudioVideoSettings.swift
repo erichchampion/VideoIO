@@ -9,13 +9,13 @@ import Foundation
 import AVFoundation
 import VideoToolbox
 
-extension AVVideoCodecType: Codable {
+extension AVVideoCodecType: @retroactive Codable {
     
 }
 
 public struct VideoSettings: Codable {
     
-    public struct ScalingMode: RawRepresentable {
+    public struct ScalingMode: RawRepresentable, Sendable {
         public let rawValue: String
         public init(rawValue: String) {
             self.rawValue = rawValue
@@ -134,20 +134,13 @@ public struct VideoSettings: Codable {
     }
     
     public static func h264(videoSize: CGSize, averageBitRate: Int? = nil) -> Self {
-        let codec: AVVideoCodecType
-        if #available(iOS 11.0, tvOS 11.0, *) {
-            codec = .h264
-        } else {
-            codec = AVVideoCodecType(rawValue: AVVideoCodecH264)
-        }
-        var videoSettings = VideoSettings(size: videoSize, codec: codec)
+        var videoSettings = VideoSettings(size: videoSize, codec: .h264)
         if let averageBitRate = averageBitRate {
             videoSettings.compressionProperties = CompressionProperties(averageBitRate: averageBitRate, profileLevel: AVVideoProfileLevelH264HighAutoLevel)
         }
         return videoSettings
     }
     
-    @available(iOS 11.0, tvOS 11.0, *)
     public static func hevc(videoSize: CGSize, averageBitRate: Int? = nil) -> Self {
         var videoSettings = VideoSettings(size: videoSize, codec: .hevc)
         if let averageBitRate = averageBitRate {
@@ -156,7 +149,7 @@ public struct VideoSettings: Codable {
         return videoSettings
     }
     
-    @available(iOS 13.0, tvOS 13.0, macOS 10.15, *)
+    @available(macOS 10.15, *)
     public static func hevcWithAlpha(videoSize: CGSize, averageBitRate: Int? = nil) -> Self {
         var videoSettings = VideoSettings(size: videoSize, codec: .hevcWithAlpha)
         if let averageBitRate = averageBitRate {

@@ -1,11 +1,11 @@
-// swift-tools-version:5.1
+// swift-tools-version:6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
 
 let package = Package(
     name: "VideoIO",
-    platforms: [.iOS(.v10),.macOS(.v10_13),.tvOS(.v10)],
+    platforms: [.iOS(.v18),.macOS(.v10_13),.tvOS(.v12)],
     products: [
         // Products define the executables and libraries produced by a package, and make them visible to other packages.
         .library(
@@ -24,6 +24,7 @@ let package = Package(
             dependencies: []),
         .testTarget(
             name: "VideoIOTests",
-            dependencies: ["VideoIO"]),
+            dependencies: ["VideoIO"],
+            resources: [.copy("ElephantsDream.mp4")]),
     ]
 )

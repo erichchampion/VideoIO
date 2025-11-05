@@ -1,7 +1,7 @@
 import AVFoundation
 import CoreImage
 
-public final class MultitrackMovieRecorder {
+public final class MultitrackMovieRecorder: @unchecked Sendable {
     
     public enum RecorderError: LocalizedError {
         case unsupportedFileType
@@ -172,7 +172,11 @@ public final class MultitrackMovieRecorder {
             return
         }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffers.first!)
-        self.queue.async {
+        // CMSampleBuffer is thread-safe for read operations and only accessed on self.queue
+        // Note: sampleBuffers capture warning is expected - CMSampleBuffer is not Sendable but is thread-safe for reads
+        nonisolated(unsafe) let sampleBuffersForClosure = sampleBuffers
+        self.queue.async { @Sendable in
+            let sampleBuffers = sampleBuffersForClosure
             //no `errorLock` is required here because the `error` can only be assigned on `self.queue`
             guard self.stopped == false, self.error == nil else {
                 return
@@ -181,7 +185,7 @@ public final class MultitrackMovieRecorder {
             if self.videoInputs.count == 0 {
                 do {
                     var videoInputs: [AVAssetWriterInput] = []
-                    for sampleBuffer in sampleBuffers {
+                    for sampleBuffer in sampleBuffersForClosure {
                         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
                             throw RecorderError.cannotSetupVideoInputs
                         }
@@ -229,8 +233,8 @@ public final class MultitrackMovieRecorder {
                 self.assetWriter.startSession(atSourceTime: presentationTime)
                 self.recordingStartSampleTime = presentationTime
                 self.lastVideoSampleTime = presentationTime
-                DispatchQueue.main.async {
-                    self.sampleWritingSessionStartedHandler?(presentationTime)
+                DispatchQueue.main.async { [weak self] in
+                    self?.sampleWritingSessionStartedHandler?(presentationTime)
                 }
             }
             
@@ -242,8 +246,8 @@ public final class MultitrackMovieRecorder {
                             let startTime = self.recordingStartSampleTime
                             let duration = presentationTime - startTime
                             self._duration = duration
-                            DispatchQueue.main.async {
-                                self.durationChangedHandler?(duration)
+                            DispatchQueue.main.async { [weak self] in
+                                self?.durationChangedHandler?(duration)
                             }
                         } else {
                             if let error = self.assetWriter.error {
@@ -282,7 +286,11 @@ public final class MultitrackMovieRecorder {
         }
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffers.first!)
         let duration = CMSampleBufferGetDuration(sampleBuffers.first!)
-        self.queue.async {
+        // CMSampleBuffer is thread-safe for read operations and only accessed on self.queue
+        // Note: sampleBuffers capture warning is expected - CMSampleBuffer is not Sendable but is thread-safe for reads
+        nonisolated(unsafe) let sampleBuffersForClosure = sampleBuffers
+        self.queue.async { @Sendable in
+            let sampleBuffers = sampleBuffersForClosure
             //no `errorLock` is required here because the `error` can only be assigned on `self.queue`
             guard self.stopped == false, self.error == nil else {
                 return
@@ -291,7 +299,7 @@ public final class MultitrackMovieRecorder {
             if self.audioInputs.count == 0 {
                 do {
                     var audioInputs: [AVAssetWriterInput] = []
-                    for sampleBuffer in sampleBuffers {
+                    for sampleBuffer in sampleBuffersForClosure {
                         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
                             throw RecorderError.cannotSetupAudioInputs
                         }
@@ -351,7 +359,7 @@ public final class MultitrackMovieRecorder {
         }
     }
     
-    public func cancelRecording(completion: @escaping () -> Void) {
+    public func cancelRecording(completion: @escaping @Sendable () -> Void) {
         self.queue.async {
             if self.stopped {
                 DispatchQueue.main.async {
@@ -376,7 +384,7 @@ public final class MultitrackMovieRecorder {
         self.queue.sync { self.stopped }
     }
     
-    public func stopRecording(completion: @escaping (Error?) -> Void) {
+    public func stopRecording(completion: @escaping @Sendable (Error?) -> Void) {
         self.queue.async {
             if self.stopped {
                 DispatchQueue.main.async {
@@ -566,13 +574,13 @@ public final class MovieRecorder {
         }
     }
     
-    public func cancelRecording(completion: @escaping () -> Void) {
+    public func cancelRecording(completion: @escaping @Sendable () -> Void) {
         internalRecorder.cancelRecording(completion: completion)
     }
     
     public var isStopped: Bool { internalRecorder.isStopped }
     
-    public func stopRecording(completion: @escaping (Error?) -> Void) {
+    public func stopRecording(completion: @escaping @Sendable (Error?) -> Void) {
         internalRecorder.stopRecording(completion: completion)
     }
 }

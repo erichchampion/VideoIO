@@ -9,10 +9,10 @@ import Foundation
 import AVFoundation
 
 @available(macOS, unavailable)
-public class PlayerVideoOutput: NSObject {
+public class PlayerVideoOutput: NSObject, @unchecked Sendable {
     
-    public struct Configuration {
-        public var sourcePixelBufferAttributes: [String: Any]?
+    public struct Configuration: @unchecked Sendable {
+        public var sourcePixelBufferAttributes: [String: any Sendable]?
         public var preferredFramesPerSecond: Int = 30
         public static let `default` = Configuration()
         public init() {
@@ -122,24 +122,49 @@ public class PlayerVideoOutput: NSObject {
                 return
             }
             if strongSelf.playerItem == item, item.status == .readyToPlay {
-                strongSelf.handleReadyToPlay()
+                Task { @MainActor in
+                    await strongSelf.handleReadyToPlay()
+                }
             }
         })
     }
     
-    private func handleReadyToPlay() {
+    @MainActor
+    private func handleReadyToPlay() async {
         guard let _ = self.player, let playerItem = self.playerItem else {
             return
         }
         
         var hasVideoTrack: Bool = false
-        for track in playerItem.asset.tracks {
-            if track.mediaType == .video {
-                hasVideoTrack = true
-                self.preferredVideoTransform = track.preferredTransform
-                break
+        let asset = playerItem.asset
+        
+        // Use async API for iOS 16.0+
+        if #available(iOS 16.0, tvOS 16.0, macOS 13.0, *) {
+            do {
+                let tracks = try await asset.load(.tracks)
+                for track in tracks {
+                    if track.mediaType == .video {
+                        hasVideoTrack = true
+                        let preferredTransform = try await track.load(.preferredTransform)
+                        self.preferredVideoTransform = preferredTransform
+                        break
+                    }
+                }
+            } catch {
+                assertionFailure("Failed to load tracks: \(error)")
+                return
+            }
+        } else {
+            // Fallback to deprecated synchronous API
+            for track in asset.tracks {
+                if track.mediaType == .video {
+                    hasVideoTrack = true
+                    self.preferredVideoTransform = track.preferredTransform
+                    break
+                }
             }
         }
+        
         if !hasVideoTrack {
             assertionFailure("No video track found.")
             return
@@ -168,8 +193,11 @@ public class PlayerVideoOutput: NSObject {
     }
     
     private func handleUpdate() {
-        if let player = self.player, player.rate != 0 {
-            self.forceUpdate = true
+        if let player = self.player {
+            let rate = player.rate
+            if rate != 0 {
+                self.forceUpdate = true
+            }
         }
         self.update(forced: self.forceUpdate)
         self.forceUpdate = false

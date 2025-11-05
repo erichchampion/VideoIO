@@ -19,7 +19,7 @@ public protocol DeviceOrientationTrackerDelegate: AnyObject {
 
 @available(macOS, unavailable)
 @available(macCatalyst 14.0, *)
-public class DeviceOrientationTracker {
+public class DeviceOrientationTracker: @unchecked Sendable {
     
     private let motionManager = CMMotionManager()
     
@@ -32,7 +32,8 @@ public class DeviceOrientationTracker {
     public var deviceOrientation: UIDeviceOrientation = .unknown
     
     // Access in main queue.
-    public var videoOrientation: AVCaptureVideoOrientation = .portrait
+    // Rotation angle in degrees (0, 90, 180, or 270) for horizon-level capture
+    public var videoRotationAngle: CGFloat = 0.0
     
     public weak var delegate: DeviceOrientationTrackerDelegate?
     
@@ -129,19 +130,22 @@ public class DeviceOrientationTracker {
         
         if _deviceOrientation != deviceOrientation {
             _deviceOrientation = deviceOrientation
-            DispatchQueue.main.async {
-                switch deviceOrientation {
-                case .landscapeLeft:
-                    self.videoOrientation = .landscapeRight
-                case .landscapeRight:
-                    self.videoOrientation = .landscapeLeft
-                case .portrait:
-                    self.videoOrientation = .portrait
-                case .portraitUpsideDown:
-                    self.videoOrientation = .portraitUpsideDown
-                default:
-                    break
-                }
+            let rotationAngle: CGFloat
+            switch deviceOrientation {
+            case .landscapeLeft:
+                rotationAngle = 270.0
+            case .landscapeRight:
+                rotationAngle = 90.0
+            case .portrait:
+                rotationAngle = 0.0
+            case .portraitUpsideDown:
+                rotationAngle = 180.0
+            default:
+                rotationAngle = 0.0
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.videoRotationAngle = rotationAngle
                 self.deviceOrientation = deviceOrientation
                 self.delegate?.deviceOrientationUpdated(tracker: self, orientation: deviceOrientation)
             }

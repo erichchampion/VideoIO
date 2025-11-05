@@ -8,7 +8,7 @@
 import Foundation
 import AVFoundation
 
-public class AssetExportSession {
+public class AssetExportSession: @unchecked Sendable {
     
     public struct Configuration {
         
@@ -80,6 +80,131 @@ public class AssetExportSession {
     private let pauseDispatchGroup = DispatchGroup()
     private var cancelled: Bool = false
     
+    // Async factory method using modern async APIs (iOS 16.0+)
+    @available(iOS 16.0, tvOS 16.0, macOS 13.0, *)
+    public static func create(asset: AVAsset, outputURL: URL, configuration: Configuration) async throws -> AssetExportSession {
+        let assetCopy = asset.copy() as! AVAsset
+        
+        let reader = try AVAssetReader(asset: assetCopy)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: configuration.fileType)
+        reader.timeRange = configuration.timeRange
+        writer.shouldOptimizeForNetworkUse = configuration.shouldOptimizeForNetworkUse
+        writer.metadata = configuration.metadata
+        
+        let duration: CMTime
+        if configuration.timeRange.duration.isValid && !configuration.timeRange.duration.isPositiveInfinity {
+            duration = configuration.timeRange.duration
+        } else {
+            duration = try await assetCopy.load(.duration)
+        }
+        
+        let videoTracks = try await assetCopy.loadTracks(withMediaType: .video)
+        var videoOutput: AVAssetReaderOutput?
+        var videoInput: AVAssetWriterInput?
+        
+        if videoTracks.count > 0 {
+            let inputTransform: CGAffineTransform?
+            if configuration.videoComposition != nil {
+                let videoCompositionOutput = AVAssetReaderVideoCompositionOutput(videoTracks: videoTracks, videoSettings: nil)
+                videoCompositionOutput.alwaysCopiesSampleData = false
+                videoCompositionOutput.videoComposition = configuration.videoComposition
+                videoOutput = videoCompositionOutput
+                inputTransform = nil
+            } else {
+                let firstTrack = videoTracks.first!
+                // Note: containsAlphaChannel is available since iOS 13.0/tvOS 13.0/macOS 10.15,
+                // but since create() requires iOS 16.0+/tvOS 16.0+/macOS 13.0+, the availability check is unnecessary
+                let mediaCharacteristics = try await firstTrack.load(.mediaCharacteristics)
+                if mediaCharacteristics.contains(.containsAlphaChannel) {
+                    videoOutput = AVAssetReaderTrackOutput(track: firstTrack, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
+                } else {
+                    videoOutput = AVAssetReaderTrackOutput(track: firstTrack, outputSettings: [kCVPixelBufferPixelFormatTypeKey as String: [kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange]])
+                }
+                videoOutput?.alwaysCopiesSampleData = false
+                inputTransform = try await firstTrack.load(.preferredTransform)
+            }
+            
+            if let videoOutput = videoOutput, reader.canAdd(videoOutput) {
+                reader.add(videoOutput)
+            } else {
+                throw Error.cannotAddVideoOutput
+            }
+            
+            if let transform = inputTransform {
+                let size = CGSize(width: configuration.videoSettings[AVVideoWidthKey] as! CGFloat, height: configuration.videoSettings[AVVideoHeightKey] as! CGFloat)
+                let transformedSize = size.applying(transform.inverted())
+                var videoSettings = configuration.videoSettings
+                videoSettings[AVVideoWidthKey] = abs(transformedSize.width)
+                videoSettings[AVVideoHeightKey] = abs(transformedSize.height)
+                videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
+                videoInput?.transform = transform
+            } else {
+                videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: configuration.videoSettings)
+            }
+            videoInput?.expectsMediaDataInRealTime = false
+            if let videoInput = videoInput, writer.canAdd(videoInput) {
+                writer.add(videoInput)
+            } else {
+                throw Error.cannotAddVideoInput
+            }
+        }
+        
+        let audioTracks = try await assetCopy.loadTracks(withMediaType: .audio)
+        var audioOutput: AVAssetReaderAudioMixOutput?
+        var audioInput: AVAssetWriterInput?
+        
+        if audioTracks.count > 0 {
+            audioOutput = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: nil)
+            audioOutput?.alwaysCopiesSampleData = false
+            audioOutput?.audioMix = configuration.audioMix
+            if let audioOutput = audioOutput, reader.canAdd(audioOutput) {
+                reader.add(audioOutput)
+            } else {
+                throw Error.cannotAddAudioOutput
+            }
+            
+            audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: configuration.audioSettings)
+            audioInput?.expectsMediaDataInRealTime = false
+            if let audioInput = audioInput, writer.canAdd(audioInput) {
+                writer.add(audioInput)
+            } else {
+                throw Error.cannotAddAudioInput
+            }
+        }
+        
+        if videoTracks.count == 0 && audioTracks.count == 0 {
+            throw Error.noTracks
+        }
+        
+        return AssetExportSession(
+            asset: assetCopy,
+            configuration: configuration,
+            outputURL: outputURL,
+            reader: reader,
+            writer: writer,
+            videoOutput: videoOutput,
+            audioOutput: audioOutput,
+            videoInput: videoInput,
+            audioInput: audioInput,
+            duration: duration
+        )
+    }
+    
+    private init(asset: AVAsset, configuration: Configuration, outputURL: URL, reader: AVAssetReader, writer: AVAssetWriter, videoOutput: AVAssetReaderOutput?, audioOutput: AVAssetReaderAudioMixOutput?, videoInput: AVAssetWriterInput?, audioInput: AVAssetWriterInput?, duration: CMTime) {
+        self.asset = asset
+        self.configuration = configuration
+        self.outputURL = outputURL
+        self.reader = reader
+        self.writer = writer
+        self.videoOutput = videoOutput
+        self.audioOutput = audioOutput
+        self.videoInput = videoInput
+        self.audioInput = audioInput
+        self.duration = duration
+    }
+    
+    // Legacy synchronous initializer - uses deprecated APIs for backward compatibility
+    // swiftlint:disable deprecated
     public init(asset: AVAsset, outputURL: URL, configuration: Configuration) throws {
         self.asset = asset.copy() as! AVAsset
         self.configuration = configuration
@@ -178,6 +303,7 @@ public class AssetExportSession {
             throw Error.noTracks
         }
     }
+    // swiftlint:enable deprecated
     
     private func encode(from output: AVAssetReaderOutput, to input: AVAssetWriterInput) -> Bool {
         while input.isReadyForMoreMediaData {
@@ -213,7 +339,7 @@ public class AssetExportSession {
     }
     
     
-    public class ExportProgress: Progress {
+    public class ExportProgress: Progress, @unchecked Sendable {
         public let videoEncodingProgress: Progress?
         public let audioEncodingProgress: Progress?
         public let finishWritingProgress: Progress
@@ -258,7 +384,7 @@ public class AssetExportSession {
     private var progress: ExportProgress?
     private var progressHandler: ((ExportProgress) -> Void)?
 
-    public func export(progress: ((ExportProgress) -> Void)?, completion: @escaping (Swift.Error?) -> Void) {
+    public func export(progress: ((ExportProgress) -> Void)?, completion: @escaping @Sendable (Swift.Error?) -> Void) {
         assert(status == .idle && cancelled == false)
         if self.status != .idle || self.cancelled {
             DispatchQueue.main.async {
@@ -295,60 +421,116 @@ public class AssetExportSession {
         
         self.writer.startSession(atSourceTime: configuration.timeRange.start)
         
-        var videoCompleted = false
-        var audioCompleted = false
+        final class CompletionState: @unchecked Sendable {
+            let lock = UnfairLock()
+            var videoCompleted = false
+            var audioCompleted = false
+            var hasCalledCompletion = false
+        }
+        let completionState = CompletionState()
 
         if let videoInput = self.videoInput, let videoOutput = self.videoOutput {
-            var sessionForVideoEncoder: AssetExportSession? = self
-            videoInput.requestMediaDataWhenReady(on: self.queue) { [unowned videoInput] in
-                guard let session = sessionForVideoEncoder else { return }
-                if !session.encode(from: videoOutput, to: videoInput) {
-                    videoCompleted = true
-                    sessionForVideoEncoder = nil
-                    if audioCompleted {
-                        session.finish(completionHandler: completion)
+            // Use a final class to hold references for thread-safe capture
+            final class VideoEncoderState: @unchecked Sendable {
+                weak var session: AssetExportSession?
+                let videoOutput: AVAssetReaderOutput
+                let videoInput: AVAssetWriterInput
+                init(session: AssetExportSession, videoOutput: AVAssetReaderOutput, videoInput: AVAssetWriterInput) {
+                    self.session = session
+                    self.videoOutput = videoOutput
+                    self.videoInput = videoInput
+                }
+            }
+            let encoderState = VideoEncoderState(session: self, videoOutput: videoOutput, videoInput: videoInput)
+            // Capture completion separately to avoid Sendable warnings
+            let completionForVideo = completion
+            // Use nonisolated(unsafe) for videoInput since it's only accessed on self.queue
+            nonisolated(unsafe) let videoInputUnsafe = videoInput
+            videoInput.requestMediaDataWhenReady(on: self.queue) { @Sendable in
+                guard let session = encoderState.session else { return }
+                if !session.encode(from: encoderState.videoOutput, to: videoInputUnsafe) {
+                    completionState.lock.lock()
+                    completionState.videoCompleted = true
+                    encoderState.session = nil
+                    let shouldComplete = completionState.audioCompleted && !completionState.hasCalledCompletion
+                    if shouldComplete {
+                        completionState.hasCalledCompletion = true
+                    }
+                    completionState.lock.unlock()
+                    if shouldComplete {
+                        let handler: @Sendable (Swift.Error?) -> Void = completionForVideo
+                        session.finish(completionHandler: handler)
                     }
                 }
             }
         } else {
-            videoCompleted = true
+            completionState.lock.lock()
+            completionState.videoCompleted = true
+            completionState.lock.unlock()
         }
         
         if let audioInput = self.audioInput, let audioOutput = self.audioOutput {
-            var sessionForAudioEncoder: AssetExportSession? = self
-            audioInput.requestMediaDataWhenReady(on: self.queue) { [unowned audioInput] in
-                guard let session = sessionForAudioEncoder else { return }
-                if !session.encode(from: audioOutput, to: audioInput) {
-                    audioCompleted = true
-                    sessionForAudioEncoder = nil
-                    if videoCompleted {
-                        session.finish(completionHandler: completion)
+            // Use a final class to hold references for thread-safe capture
+            final class AudioEncoderState: @unchecked Sendable {
+                weak var session: AssetExportSession?
+                let audioOutput: AVAssetReaderAudioMixOutput
+                let audioInput: AVAssetWriterInput
+                init(session: AssetExportSession, audioOutput: AVAssetReaderAudioMixOutput, audioInput: AVAssetWriterInput) {
+                    self.session = session
+                    self.audioOutput = audioOutput
+                    self.audioInput = audioInput
+                }
+            }
+            let encoderState = AudioEncoderState(session: self, audioOutput: audioOutput, audioInput: audioInput)
+            // Capture completion separately to avoid Sendable warnings
+            let completionForAudio = completion
+            // Use nonisolated(unsafe) for audioInput since it's only accessed on self.queue
+            nonisolated(unsafe) let audioInputUnsafe = audioInput
+            audioInput.requestMediaDataWhenReady(on: self.queue) { @Sendable in
+                guard let session = encoderState.session else { return }
+                if !session.encode(from: encoderState.audioOutput, to: audioInputUnsafe) {
+                    completionState.lock.lock()
+                    completionState.audioCompleted = true
+                    encoderState.session = nil
+                    let shouldComplete = completionState.videoCompleted && !completionState.hasCalledCompletion
+                    if shouldComplete {
+                        completionState.hasCalledCompletion = true
+                    }
+                    completionState.lock.unlock()
+                    if shouldComplete {
+                        let handler: @Sendable (Swift.Error?) -> Void = completionForAudio
+                        session.finish(completionHandler: handler)
                     }
                 }
             }
         } else {
-            audioCompleted = true
+            completionState.lock.lock()
+            completionState.audioCompleted = true
+            completionState.lock.unlock()
         }
     }
     
-    private func dispatchProgressCallback(with updater: @escaping (ExportProgress) -> Void) {
-        DispatchQueue.main.async {
-            if let progress = self.progress {
-                updater(progress)
-                self.progressHandler?(progress)
-            }
+    private func dispatchProgressCallback(with updater: @escaping @Sendable (ExportProgress) -> Void) {
+        // Extract values before closure to avoid sending self
+        let progress = self.progress
+        // Use nonisolated(unsafe) for progressHandler since it's only accessed on main queue
+        nonisolated(unsafe) let progressHandler = self.progressHandler
+        DispatchQueue.main.async { @Sendable in
+            guard let progress = progress else { return }
+            updater(progress)
+            progressHandler?(progress)
         }
     }
     
-    private func dispatchCallback(with error: Swift.Error?, _ completionHandler: @escaping (Swift.Error?) -> Void) {
-        DispatchQueue.main.async {
+    private func dispatchCallback(with error: Swift.Error?, _ completionHandler: @escaping @Sendable (Swift.Error?) -> Void) {
+        DispatchQueue.main.async { @Sendable in
             self.progressHandler = nil
             self.status = .completed
             completionHandler(error)
         }
     }
     
-    private func finish(completionHandler: @escaping (Swift.Error?) -> Void) {
+    private func finish(completionHandler: @escaping @Sendable (Swift.Error?) -> Void) {
         dispatchPrecondition(condition: DispatchPredicate.onQueue(queue))
         
         if self.reader.status == .cancelled || self.writer.status == .cancelled {
@@ -376,8 +558,8 @@ public class AssetExportSession {
             self.writer.cancelWriting()
             self.dispatchCallback(with: self.reader.error, completionHandler)
         } else {
-            self.writer.finishWriting {
-                self.queue.async {
+            self.writer.finishWriting { @Sendable in
+                self.queue.async { @Sendable in
                     if self.writer.status == .failed {
                         try? FileManager().removeItem(at: self.outputURL)
                     }
@@ -417,7 +599,7 @@ public class AssetExportSession {
             return
         }
         self.cancelled = true
-        self.queue.async {
+        self.queue.async { @Sendable in
             if self.reader.status == .reading {
                 self.reader.cancelReading()
             }
