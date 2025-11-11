@@ -71,17 +71,22 @@ public final class MultitrackMovieRecorder: @unchecked Sendable {
         
         public var shouldOptimizeForNetworkUse: Bool
         
+        /// Parsed frame-rate hint from the client configuration.
+        public var targetFrameRate: Int?
+        
         @available(*, deprecated, renamed: "init(numberOfVideoTracks:numberOfAudioTracks:shouldOptimizeForNetworkUse:)")
         public init(videoTrackCount: Int, audioTrackCount: Int, optimizeForNetworkUse: Bool = true) {
             numberOfVideoTracks = videoTrackCount
             numberOfAudioTracks = audioTrackCount
             shouldOptimizeForNetworkUse = optimizeForNetworkUse
+            targetFrameRate = nil
         }
         
         public init(numberOfVideoTracks: Int, numberOfAudioTracks: Int, shouldOptimizeForNetworkUse: Bool = true) {
             self.numberOfAudioTracks = numberOfAudioTracks
             self.numberOfVideoTracks = numberOfVideoTracks
             self.shouldOptimizeForNetworkUse = shouldOptimizeForNetworkUse
+            self.targetFrameRate = nil
         }
     }
     
@@ -197,8 +202,27 @@ public final class MultitrackMovieRecorder: @unchecked Sendable {
                         if videoSettings.isEmpty {
                             videoSettings = VideoSettings.h264(videoSize: size).toDictionary()
                         }
+                        let originalVideoSettings = videoSettings
+                        if let targetFrameRate = self.configuration.targetFrameRate {
+                            videoSettings = Self.videoSettings(byEnforcing: targetFrameRate, on: videoSettings)
+                        }
+                        
                         if self.assetWriter.canApply(outputSettings: videoSettings, forMediaType: .video) {
                             let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings, sourceFormatHint: formatDescription)
+                            videoInput.expectsMediaDataInRealTime = true
+                            videoInput.transform = transform
+                            if self.assetWriter.canAdd(videoInput) {
+                                self.assetWriter.add(videoInput)
+                                videoInputs.append(videoInput)
+                            } else {
+                                throw RecorderError.cannotSetupVideoInputs
+                            }
+                        } else if let targetFrameRate = self.configuration.targetFrameRate {
+                            print("VideoIO: Asset writer rejected enforced frame rate \(targetFrameRate); falling back to provided video settings.")
+                            guard self.assetWriter.canApply(outputSettings: originalVideoSettings, forMediaType: .video) else {
+                                throw RecorderError.cannotSetupVideoInputs
+                            }
+                            let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: originalVideoSettings, sourceFormatHint: formatDescription)
                             videoInput.expectsMediaDataInRealTime = true
                             videoInput.transform = transform
                             if self.assetWriter.canAdd(videoInput) {
@@ -479,6 +503,17 @@ public final class MultitrackMovieRecorder: @unchecked Sendable {
     }
 }
 
+private extension MultitrackMovieRecorder {
+    static func videoSettings(byEnforcing frameRate: Int, on baseSettings: [String: Any]) -> [String: Any] {
+        var settings = baseSettings
+        var compressionProperties = settings[AVVideoCompressionPropertiesKey] as? [String: Any] ?? [:]
+        compressionProperties[AVVideoExpectedSourceFrameRateKey] = frameRate
+        compressionProperties[AVVideoMaxKeyFrameIntervalKey] = frameRate
+        settings[AVVideoCompressionPropertiesKey] = compressionProperties
+        return settings
+    }
+}
+
 private extension Sequence {
     func stableGroup(using predicate: (Element) throws -> Bool) rethrows -> ([Element], [Element]) {
         var trueGroup: [Element] = []
@@ -540,22 +575,63 @@ public final class MovieRecorder {
         /// Set to `true` to write the file in a way that is more suitable for playback over a network.
         public var shouldOptimizeForNetworkUse: Bool
         
+        /// Parsed target frame rate hint sourced from `videoSettings`.
+        public var targetFrameRate: Int?
+        
         public init(hasAudio: Bool, shouldOptimizeForNetworkUse: Bool = true) {
             self.hasAudio = hasAudio
             self.shouldOptimizeForNetworkUse = shouldOptimizeForNetworkUse
+            self.targetFrameRate = nil
         }
     }
     
     public let configuration: Configuration
     
     public init(url: URL, configuration: Configuration) throws {
-        self.configuration = configuration
+        var configuration = configuration
+        configuration.targetFrameRate = MovieRecorder.parseFrameRateHint(from: configuration.videoSettings)
         var internalConfiguration = MultitrackMovieRecorder.Configuration(numberOfVideoTracks: 1, numberOfAudioTracks: configuration.hasAudio ? 1 : 0, shouldOptimizeForNetworkUse: configuration.shouldOptimizeForNetworkUse)
         internalConfiguration.metadata = configuration.metadata
         internalConfiguration.videoOrientation = configuration.videoOrientation
         internalConfiguration.videoSettings = configuration.videoSettings
         internalConfiguration.audioSettings = configuration.audioSettings
+        internalConfiguration.targetFrameRate = configuration.targetFrameRate
+        self.configuration = configuration
         self.internalRecorder = try MultitrackMovieRecorder(url: url, configuration: internalConfiguration)
+    }
+    
+    private static func parseFrameRateHint(from videoSettings: [String: Any]) -> Int? {
+        if videoSettings.isEmpty {
+            print("VideoIO: No videoSettings provided; using default frame pacing.")
+            return nil
+        }
+        
+        guard let compressionProperties = videoSettings[AVVideoCompressionPropertiesKey] as? [String: Any] else {
+            print("VideoIO: videoSettings missing AVVideoCompressionPropertiesKey; using default frame pacing.")
+            return nil
+        }
+        
+        guard let rawValue = compressionProperties[AVVideoExpectedSourceFrameRateKey] else {
+            print("VideoIO: AVVideoExpectedSourceFrameRateKey missing; using default frame pacing.")
+            return nil
+        }
+        
+        if let frameRate = rawValue as? Int, frameRate > 0 {
+            return frameRate
+        }
+        
+        if let number = rawValue as? NSNumber {
+            let frameRate = number.intValue
+            if frameRate > 0 {
+                if number.doubleValue != Double(frameRate) {
+                    print("VideoIO: AVVideoExpectedSourceFrameRateKey value \(number.doubleValue) is not integral; rounding to \(frameRate).")
+                }
+                return frameRate
+            }
+        }
+        
+        print("VideoIO: AVVideoExpectedSourceFrameRateKey must be a positive integer; received \(rawValue). Using default frame pacing.")
+        return nil
     }
     
     public func appendSampleBuffer(_ sampleBuffer: CMSampleBuffer) throws {
